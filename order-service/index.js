@@ -1,4 +1,5 @@
 const { Kafka } = require('kafkajs');
+const redis = require('redis');
 
 const kafka = new Kafka({
   clientId: 'order-service',
@@ -7,42 +8,43 @@ const kafka = new Kafka({
 
 const producer = kafka.producer();
 
-const orders = [];
+const subscriber = redis.createClient({
+  socket: { host: 'redis', port: 6379 }
+});
 
-async function createOrder(product, quantity, price) {
-  const order = {
-    id: 'order_' + Date.now(),
-    product,
-    quantity,
-    price,
-    status: 'pending',
-    createdAt: new Date().toISOString()
-  };
+const store = redis.createClient({
+  socket: { host: 'redis', port: 6379 }
+});
 
-  orders.push(order);
+async function processOrder(order) {
+  console.log(`📦 Processing order: ${order.id}`);
 
+  // Update status to processing
+  order.status = 'processing';
+  await store.setEx(`order:${order.id}`, 3600, JSON.stringify(order));
+
+  // Send to Kafka for other services
   await producer.send({
     topic: 'orders',
     messages: [{ key: order.id, value: JSON.stringify(order) }]
   });
 
-  console.log(`📦 Order created and sent to Kafka:`, order);
-  return order;
+  console.log(`✅ Order ${order.id} sent to Kafka`);
 }
 
 async function main() {
+  await subscriber.connect();
+  await store.connect();
   await producer.connect();
   console.log('Order Service started ✅');
 
-  // Simulate orders coming in
-  await createOrder('Laptop', 1, 999);
-  await new Promise(r => setTimeout(r, 2000));
-  await createOrder('Phone', 2, 599);
-  await new Promise(r => setTimeout(r, 2000));
-  await createOrder('Keyboard', 1, 149);
+  // Listen for new orders from API Gateway via Redis pub/sub
+  await subscriber.subscribe('new_orders', async (message) => {
+    const order = JSON.parse(message);
+    await processOrder(order);
+  });
 
-  console.log(`Total orders processed: ${orders.length}`);
-  await producer.disconnect();
+  console.log('Listening for new orders... 👂');
 }
 
 main();
